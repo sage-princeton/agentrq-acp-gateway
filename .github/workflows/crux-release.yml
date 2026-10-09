@@ -1,0 +1,51 @@
+name: Crux release
+
+# Builds the gateway CRUX boxes install. A crux-v<version> tag on a crux/*
+# branch becomes a GitHub release carrying the npm pack tarball and its
+# sha256, which provisioning pins. Nothing is published to npm.
+
+on:
+  push:
+    tags:
+      - 'crux-v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Check the tag matches package.json
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          [ "$GITHUB_REF_NAME" = "crux-v$VERSION" ] \
+            || { echo "Tag $GITHUB_REF_NAME does not match package.json version $VERSION"; exit 1; }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Pack
+        run: |
+          TARBALL=$(npm pack --silent | tail -1)
+          sha256sum "$TARBALL" > "$TARBALL.sha256"
+          cat "$TARBALL.sha256"
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$TARBALL" "$TARBALL.sha256" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Built from $GITHUB_SHA by this workflow. Install with npm install -g <tarball> after checking its sha256 against the .sha256 asset."
