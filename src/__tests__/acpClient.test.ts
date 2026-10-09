@@ -1543,6 +1543,56 @@ describe("AgentRQACPClient", () => {
       expect(client.pendingPermissionCount).toBe(0);
     });
 
+    it("should take a verdict that arrives before the request has finished sending", async () => {
+      vi.useFakeTimers();
+      const cancel = vi.fn();
+      const bounded = new AgentRQACPClient(mcpBridge as unknown as MCPBridge, () => "task-1", {
+        permissionTimeoutMs: 60_000,
+      });
+      bounded.setSessionCanceller(cancel);
+      // agentrq auto-approves inside the handler that receives the request, so
+      // its verdict can come back over the event stream before the POST that
+      // carried the request has been answered.
+      let acknowledge!: () => void;
+      mcpBridge.sendNotification.mockImplementationOnce((_m: string, p: any) => {
+        mcpBridge.emit("verdict", { requestId: p.request_id, behavior: "allow" });
+        return new Promise<void>((resolve) => {
+          acknowledge = resolve;
+        });
+      });
+
+      const waiting = bounded.requestPermission(params());
+      acknowledge();
+      const settledFirst = await Promise.race([
+        waiting,
+        vi.advanceTimersByTimeAsync(60_000).then(() => "timed out"),
+      ]);
+
+      expect(settledFirst).toEqual({ outcome: { outcome: "selected", optionId: "opt-1" } });
+      expect(cancel).not.toHaveBeenCalled();
+      expect(bounded.pendingPermissionCount).toBe(0);
+      vi.useRealTimers();
+    });
+
+    it("should not stop the turn later for a request that failed to send", async () => {
+      vi.useFakeTimers();
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const cancel = vi.fn();
+      const bounded = new AgentRQACPClient(mcpBridge as unknown as MCPBridge, () => "task-1", {
+        permissionTimeoutMs: 60_000,
+      });
+      bounded.setSessionCanceller(cancel);
+      mcpBridge.sendNotification.mockRejectedValueOnce(new Error("offline"));
+
+      expect((await bounded.requestPermission(params())).outcome.outcome).toBe("cancelled");
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(cancel).not.toHaveBeenCalled();
+      expect(bounded.pendingPermissionCount).toBe(0);
+      consoleSpy.mockRestore();
+      vi.useRealTimers();
+    });
+
     it("should ignore a verdict for a call that is not waiting", async () => {
       answerWith("allow");
       await client.requestPermission(params());
